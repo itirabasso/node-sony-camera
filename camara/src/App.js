@@ -1,24 +1,71 @@
 import React, { useMemo, useState, useEffect } from "react";
 import "./App.css";
 // import useEventListener from "@use-it/event-listener";
+import io from "socket.io-client";
+import { Z_NO_COMPRESSION } from "zlib";
 
-import SonyCamera from "sony-camera";
+// import SonyCamera from "sony-camera";
 
 function App() {
+  const [socket, setSocket] = useState();
   const [image, setImage] = useState("");
+  const [updates, setUpdates] = useState([]);
   const [settings, setSettings] = useState({});
-  const [cam, setCam] = useState();
+
+  let ps = {};
   // const cam = useMemo(() => startCamera(), []);
   // const cam = useCallback(() => useCamera(), []);
-  const settingElements = useMemo(() => buildSettings(), [settings]);
 
-  function buildSettings() {
-    return Object.entries(settings).map(([name, settings]) => {
-      // console.log("building setting", name, settings);
-      const options = (settings.available || []).map((value, index) => {
-        const selected = settings.current === value;
-        return <option selected={selected}>{value}</option>;
-      });
+  useEffect(() => {
+    const s = io.connect("http://localhost:3001");
+
+    s.on("image", img => {
+      console.log("live view jpge", img.length);
+      if (img) {
+        setImage(img.toString("base64"));
+      }
+    });
+
+    s.on("update", (param, value) => {
+      // console.log("update x", param, value);
+      updateSetting(param, value);
+    });
+
+    s.on("params", params => {
+      console.log("params", params);
+      ps = params;
+      setSettings(params);
+    });
+
+    s.on("status", message => {
+      console.log("status update", message);
+      updates.push(message);
+      setUpdates(updates);
+      // $('#updates').append($('<li>').text(message));
+    });
+
+    setSocket(s);
+  }, []);
+
+  const buildSettings = () => {
+    // console.log('settings length', Object.keys(settings).length)
+    return Object.entries(settings).map(([name, setting]) => {
+      // console.log("building setting", name, setting);
+      const { available, current } = setting;
+      let options;
+      if (available === undefined || available.length === 0) {
+        options = (
+          <option key={name} selected="true">
+            {current}
+          </option>
+        );
+      } else {
+        options = (available || []).map((value, i) => (
+          <option key={i} selected={current === value}>
+            {value}
+          </option>
+        ));
+      }
 
       return (
         <li>
@@ -26,9 +73,8 @@ function App() {
           <select
             id={"param-" + name}
             onChange={e => {
-              console.log("event", e);
-              // updateSetting(name, e.target.value);
-              cam.set(name, e.target.value, () => {});
+              console.log("setting", name, e.target.value);
+              socket.emit("set", name, e.target.value);
             }}
           >
             {options}>
@@ -36,79 +82,39 @@ function App() {
         </li>
       );
     });
-  }
+  };
 
-  function updateSetting(name, data) {
-    console.log("Update setting", name, data, data.current);
+  const updateSetting = (name, data) => {
+    // console.log("Update setting", name, data, data.current);
     // cam.set(name, data.current);
-    console.log("settings", settings);
-    const setting = settings[name] || {};
-    console.log(setting)
+    // console.log("settings", settings);
+    // const setting = settings[name] || {};
+    console.log("updating", name, data);
+    console.log(settings, ps);
     setSettings({
-      ...settings,
-      [name]: {
-        ...setting,
-        current: data
-      }
+      ...ps,
+      [name]: data
     });
-  }
-
-  useEffect(() => {
-    const cam = new SonyCamera();
-
-    // console.log("cam", cam);
-    cam.on("update", (param, value) => {
-      console.log("update", param, value);
-      updateSetting(param, value);
-    });
-    // useEventListener(
-    //   "liveviewJpeg",
-    //   img => {
-    //     console.log("live view jpge", img.length);
-    //     if (img) {
-    //       setImage(img.toString("base64"));
-    //     }
-    //   },
-    //   cam
-    // );
-    cam.on("liveviewJpeg", img => {
-      console.log("live view jpge", img.length);
-      if (img) {
-        setImage(img.toString("base64"));
-      }
-    });
-
-    cam.connect(() => {
-      console.log("connected", cam, cam.params);
-      console.log("a", settings);
-      setSettings(cam.params);
-      console.log("b", settings);
-    });
-
-    setCam(cam);
-  }, []);
+  };
 
   const capture = doubleCallback => {
-    cam.capture(doubleCallback, (err, name, image) => {
-      if (err) {
-        console.log("status", "Error", err);
-      }
-      if (image) {
-        setImage(image.toString("base64"));
-      }
-      if (name && !image) {
-        console.log("status", "new photo", name);
-      }
-    });
+    socket.emit("capture");
   };
 
   const startViewer = () => {
-    cam.startViewfinder();
+    socket.emit("startViewfinder");
   };
 
   const stopViewer = () => {
-    cam.stopViewfinder();
+    socket.emit("stopViewfinder");
   };
+
+  const zoomIn = () => {
+    socket.emit('zoomIn')
+  }
+
+  const settingElements = useMemo(() => buildSettings(), [settings]);
+  const updateMessages = useMemo(() => updates.map(m => <li>{m}</li>));
 
   return (
     <div>
@@ -123,6 +129,7 @@ function App() {
         <button id="stopViewfinder" onClick={() => stopViewer()}>
           Liveview Off
         </button>
+        <button onClick={() => zoomIn()}>zoom in</button>
       </div>
       <div id="panel2">
         <img
@@ -132,7 +139,7 @@ function App() {
         ></img>
       </div>
       <div id="panel3">
-        <ul id="updates"></ul>
+        <ul id="updates">{updateMessages}</ul>
       </div>
     </div>
   );

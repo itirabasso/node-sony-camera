@@ -5,6 +5,7 @@ var semver = require("semver");
 var util = require("util");
 var EventEmitter = require("events").EventEmitter;
 var assert = require("assert");
+const needle = require('needle');
 
 var minVersionRequired = "2.1.4";
 
@@ -40,6 +41,10 @@ SonyCamera.prototype.call = function(method, params, callback) {
   var self = this;
   this.rpcReq.method = method;
   this.rpcReq.params = params || [];
+  if (this.version !== undefined) {
+    console.log("version:", this.version);
+    this.rpcReq.version = this.version;
+  }
   var postData = JSON.stringify(this.rpcReq);
 
   var timeoutHandle = null;
@@ -74,31 +79,33 @@ SonyCamera.prototype.call = function(method, params, callback) {
       }
     });
   }
-
-  const req = http.request(
-    {
-      method: "POST",
-      data: postData,
-      hostname: this.url,
-      port: this.port,
-      path: this.path,
-      timeout: 2000,
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Content-Length": Buffer.byteLength(postData)
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        method: "POST",
+        data: postData,
+        hostname: this.url,
+        port: this.port,
+        path: this.path,
+        timeout: 2000,
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Content-Length": Buffer.byteLength(postData)
+        }
+      },
+      processResponse
+    );
+    req.on("error", err => {
+      console.log("requst error", err);
+      if (err && err.code) {
+        console.log("SonyWifi: network appears to be disconnected");
+        self.emit("disconnected");
       }
-    },
-    processResponse
-  );
+      reject(err);
+    });
 
-  req.on("error", err => {
-    console.log("requst error", err);
-    if (err && err.code) {
-      console.log("SonyWifi: network appears to be disconnected");
-      self.emit("disconnected");
-    }
-    callback && callback(err);
-  });
+  })
+
 
   timeoutHandle = setTimeout(function() {
     req.abort();
@@ -110,81 +117,117 @@ SonyCamera.prototype.call = function(method, params, callback) {
   req.end();
 };
 
+SonyCamera.prototype.getParam = function(name) {
+  return this.params[name] ? this.params[name].current : undefined;
+};
+SonyCamera.prototype.setParam = function(name, newValue, candidates) {
+  // console.log("Updating", name, newValue, candidates.length);
+  if (this.params[name] === undefined) {
+    this.params[name] = {};
+  }
+  if (newValue !== undefined) {
+    this.params[name].current = newValue;
+  }
+  if (candidates !== undefined) {
+    this.params[name].available = candidates;
+  }
+};
+
 SonyCamera.prototype._processEvents = function(waitForChange, callback) {
-  var self = this;
   this.eventPending = true;
-  this.call("getEvent", [waitForChange || false], function(err, results) {
-    self.eventPending = false;
+  this.call("getEvent", [waitForChange || false], (err, results) => {
+    this.eventPending = false;
     // console.log(err);
     if (!err) {
+      // console.log(results);
       for (var i = 0; i < results.length; i++) {
-        var item = results[i];
+        let item = results[i];
+        console.log("Item", i);
+        console.log(item);
+
         if (item instanceof Array) {
           if (item.length > 0) {
             item = {
               type: item[0].type,
               items: item
             };
-            console.log("Incoming array of events", type, items);
           } else {
             continue;
           }
         }
-        if (!item) {
-          console.log("Incoming empty event");
+
+        if (!item || (Array.isArray(item) && item.length === 0)) {
           continue;
-        } else if (item.type && item.type == "cameraStatus") {
-          console.log("Incoming camera status event");
-          self.status = item.cameraStatus;
-          if (self.status == "NotReady") {
-            self.connected = false;
-            console.log("SonyWifi: disconnected, trying to reconnect");
-            setTimeout(function() {
-              self.connect();
-            }, 2500);
-          }
-          if (self.status == "IDLE") self.ready = true;
-          else self.ready = false;
-          if (self.status != item.cameraStatus) {
-            self.emit("status", item.cameraStatus);
-            console.log("SonyWifi: status", self.status);
-          }
-        } else if (item.type && item.type == "storageInformation") {
-          for (var j = 0; j < item.items.length; j++) {
-            if (item.items[j].recordTarget) {
-              self.photosRemaining =
-                item.items[j].numberOfRecordableImages || 0;
+        }
+
+        const { type } = item;
+        // console.log("xxxx", item, type);
+        switch (type) {
+          case "cameraStatus":
+            console.log("Incoming camera status event");
+            this.status = item.cameraStatus;
+            switch (this.status) {
+              case "NotReady":
+                this.connected = false;
+                console.log("SonyWifi: disconnected, trying to reconnect");
+                setTimeout(function() {
+                  this.connect();
+                }, 2500);
+                break;
+              case "IDLE":
+                this.ready = true;
+                break;
+              default:
+                this.ready = false;
             }
-          }
-        } else if (item.type && item.type == "availableApiList") {
-          self.availableApiList = item.names || [];
-        } else if (item.type && item[item.type + "Candidates"]) {
-          var oldVal = self.params[item.type]
-            ? self.params[item.type].current
-            : null;
-          self.params[item.type] = {
-            current:
-              item[
-                "current" +
-                  item.type.charAt(0).toUpperCase() +
-                  item.type.slice(1)
-              ],
-            available: item[item.type + "Candidates"]
-          };
-          if (oldVal !== self.params[item.type].current) {
-            console.log(
-              "xxSonyWifi: " +
-                item.type +
-                " = " +
-                self.params[item.type].current +
-                "(+" +
-                (self.params[item.type].available
-                  ? self.params[item.type].available.length
-                  : "NULL") +
-                " available)"
-            );
-            self.emit("update", item.type, self.params[item.type]);
-          }
+            this.emit("status", item.cameraStatus);
+            console.log("SonyWifi: status", this.status);
+            break;
+          case "zoomInformation":
+            break;
+          case "liveviewStatus":
+            break;
+          case "liveviewOrientation":
+            break;
+          case "takePicture":
+            break;
+
+          case "storageInformation":
+            this.photosRemaining = item.items
+              .filter(media => media.recordTarget)
+              .map(media => media.numberOfRecordableImages || 0)
+              .reduce((acc, amount) => acc + amount);
+            break;
+
+          case "availableApiList":
+            this.availableApiList = item.names || [];
+            break;
+          default:
+            const getEventData = () => {
+              // console.log("itemx", i, type);
+              const currentKey =
+                "current" + type.charAt(0).toUpperCase() + type.slice(1);
+              return {
+                candidates: item[item.type + "Candidates"] || [],
+                current: item[currentKey],
+                type: type
+              };
+            };
+            const emitParamUpdate = name => {
+              this.emit("update", name, this.params[name]);
+            };
+            const previousValue = this.getParam(type);
+            const { candidates, current } = getEventData();
+            this.setParam(type, current, candidates);
+            if (previousValue !== current) {
+              console.log(
+                "SonyWifi: %s = %s (+ %d available)",
+                type,
+                current,
+                candidates.length
+              );
+              emitParamUpdate(type);
+            }
         }
       }
     }
@@ -196,14 +239,31 @@ SonyCamera.prototype._processEvents = function(waitForChange, callback) {
 };
 
 SonyCamera.prototype.connect = function(callback) {
-  var self = this;
-  if (this.connecting) return callback && callback("Already trying to connect");
+  // var self = this;
+  if (this.connecting) {
+    return callback && callback("Already trying to connect");
+  }
   this.connecting = true;
-  console.log("SonyWifi: connecting...");
-  this.getAppVersion(function(err, version) {
+  console.log("Connecting...")
+  try {
+    const version = await this.getAppVersion();
+    console.log("Application version: %s", version);
+    if (!semver.gte(version, minVersionRequired)) {
+      throw new Error("Application version if not compatible");
+    }
+    const afterConnected = () => {
+      this.connected = true;
+
+    }
+    this.version = version;
+  } catch (error) {
+    this.connecting = false;
+    callback && callback(err);
+  }
+  this.getAppVersion((err, version) => {
     if (!err && version) {
-      console.log("SonyWifi: app version", version);
       if (semver.gte(version, minVersionRequired)) {
+        self.version = version;
         var connected = function() {
           self.connected = true;
           var _checkEvents = function(err) {
@@ -223,7 +283,7 @@ SonyCamera.prototype.connect = function(callback) {
         if (self.method == "old") {
           self.call("startRecMode", null, function(err) {
             if (!err && !self.connected) {
-              connected();
+              youtub();
             } else {
               self.connecting = false;
               callback && callback(err);
@@ -285,23 +345,35 @@ SonyCamera.prototype.startViewfinder = function(req, res) {
       var imageBuffer;
 
       var buffer = Buffer.alloc ? Buffer.alloc(0) : new Buffer(0);
-      let processing = false;
+      let frameNumber = 0;
+
       liveview.on("data", function(chunk) {
-        // console.log("jpegsize", jpegSize, jpegSize / (1024 * 1024), "MB");
         if (jpegSize === 0) {
-          console.log("Incoming new frame");
+          // console.log("Incoming new frame");
           buffer = Buffer.concat([buffer, chunk]);
+
+          if (buffer.length < COMMON_HEADER_SIZE + PAYLOAD_HEADER_SIZE) {
+            return;
+          }
+
           const startByte = buffer.readUIntBE(0, 1);
           const payloadType = buffer.readUIntBE(1, 1);
+          if (startByte !== 0xff) {
+            console.log("skipping until next packet");
+            const pos = buffer.indexOf("24356879", 0, "hex");
+            console.log(pos);
+            buffer = buffer.slice(pos - 8);
+            console.log(buffer.subarray(0, 20));
+          }
           // const fixedBytes = buffer.readUIntBE(8, 1);
           // console.log("startByte", startByte);
-          console.log("payloadType", payloadType);
+          // console.log("payloadType", payloadType);
           // console.log("fixedBytes", fixedBytes);
           // assert(startByte === 0xff, "invalid start byte");
           // assert(payloadType === 0x01, "invalid payload type");
-          const payloadFixedBytes = [0, 1, 2, 3].map(i =>
-            buffer.readUInt8(8 + i)
-          );
+          // const payloadFixedBytes = [0, 1, 2, 3].map(i =>
+          //   buffer.readUInt8(8 + i)
+          // );
           // assert(
           //   payloadFixedBytes[0] === 0x24 &&
           //     payloadFixedBytes[1] === 0x35 &&
@@ -318,7 +390,7 @@ SonyCamera.prototype.startViewfinder = function(req, res) {
             buffer.readUInt8(COMMON_HEADER_SIZE + JPEG_SIZE_POSITION) * 65536 +
             buffer.readUInt16BE(COMMON_HEADER_SIZE + JPEG_SIZE_POSITION + 1);
 
-          const frameNumber = buffer.readUInt16BE(FRAME_NUMBER_POSITION);
+          frameNumber = buffer.readUInt16BE(FRAME_NUMBER_POSITION);
           console.log(
             "new frame",
             frameNumber,
@@ -334,7 +406,7 @@ SonyCamera.prototype.startViewfinder = function(req, res) {
           paddingSize = buffer.readUInt8(
             COMMON_HEADER_SIZE + PADDING_SIZE_POSITION
           );
-          console.log("padding size", paddingSize);
+          // console.log("padding size", paddingSize);
 
           // skip common header and payload header
           buffer = buffer.slice(8 + 128);
@@ -351,19 +423,22 @@ SonyCamera.prototype.startViewfinder = function(req, res) {
 
           if (chunk.length < jpegSize) {
             jpegSize -= chunk.length;
-            assert(jpegSize >= 0, "frame is splitted, remaining bytes: " + jpegSize);
-          } else {
-            self.emit("liveviewJpeg", imageBuffer);
-            buffer = chunk.slice(jpegSize + paddingSize);
-            console.log(
-              "frame completed",
-              imageBuffer.length,
-              "remaining bytes",
-              chunk.length
+            assert(
+              jpegSize >= 0,
+              "frame is splitted, remaining bytes: " + jpegSize
             );
+          } else {
+            self.emit("liveviewJpeg", frameNumber, imageBuffer);
+            buffer = chunk.slice(jpegSize + paddingSize);
+            // console.log(
+            //   "frame completed",
+            //   imageBuffer.length,
+            //   "remaining bytes",
+            //   chunk.length
+            // );
             jpegSize = 0;
             bufferIndex = 0;
-            console.log(buffer.subarray(0, 100))
+            // console.log(buffer.subarray(0, 100))
           }
         }
       });
@@ -482,6 +557,8 @@ SonyCamera.prototype.zoomOut = function(callback) {
   this.call("actZoom", ["out", "start"], callback);
 };
 
+
+
 SonyCamera.prototype.getAppVersion = function(callback) {
   this.call("getApplicationInfo", null, function(err, res) {
     var version = null;
@@ -509,6 +586,10 @@ SonyCamera.prototype.set = function(param, value, callback) {
 // if (typeof window !== "undefined" && window.SonyCamera) {
 //   window.SonyCamera = SonyCamera;
 // }
+
+SonyCamera.prototype.getServerInfo = function() {
+  this.call("getAvailableApiList", [], (msg, b, c) => console.log(msg, b, c));
+};
 
 module.exports = SonyCamera;
 // // Server-side export
