@@ -3,6 +3,7 @@ var http = require("http").Server(app);
 var io = require("socket.io")(http);
 var SonyCamera = require("../index.js");
 var cors = require("cors");
+const fs = require("fs");
 
 var cam = new SonyCamera();
 
@@ -15,6 +16,12 @@ cam.on("update", (param, value) => {
 let currentFrame = 0;
 cam.on("liveviewJpeg", (frameNumber, image) => {
   if (currentFrame > frameNumber) {
+    //   if (image) io.emit("image", image.toString("base64"));
+    //   if (name && !image) io.emit("status", "new photo: " + name);
+    // })
+    // .catch(error => {
+    //   return io.emit("status", "Error: " + error);
+    // });rameNumber) {
     return;
   }
   if (image) {
@@ -22,19 +29,27 @@ cam.on("liveviewJpeg", (frameNumber, image) => {
   }
 });
 
+cam.on("newPhoto", (name, image) => {
+  console.log('got a new photo, saving to disk');
+  fs.writeFileSync("./photos/" + name, image);
+});
+
 cam.connect();
+
 
 io.on("connection", function(socket) {
   io.emit("params", cam.params);
-  socket.on("capture", function() {
-    cam.capture(true, function(err, name, image) {
-      if (err) {
-        return io.emit("status", "Error: " + err);
-      }
-      if (image) io.emit("image", image.toString("base64"));
-      if (name && !image) io.emit("status", "new photo: " + name);
-    });
+  socket.on("capture", () => {
+    cam.capture();
+    // .then((name, image) => {
+    //   if (image) io.emit("image", image.toString("base64"));
+    //   if (name && !image) io.emit("status", "new photo: " + name);
+    // })
+    // .catch(error => {
+    //   return io.emit("status", "Error: " + error);
+    // });
   });
+
   socket.on("startViewfinder", function() {
     console.log("starting liveview");
     cam.startViewfinder();
@@ -45,10 +60,10 @@ io.on("connection", function(socket) {
   socket.on("set", function(param, value) {
     cam.set(param, value);
   });
-  socket.on('zoomIn', () => {
+  socket.on("zoomIn", () => {
     // cam.zoomIn();
-    cam.getServerInfo()
-  })
+    cam.getServerInfo();
+  });
 });
 
 app.use(
